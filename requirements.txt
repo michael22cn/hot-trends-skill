@@ -1,0 +1,18 @@
+# Python dependencies
+playwright
+requests
+feedparser
+beautifulsoup4
+
+# ─────────────────────────────────────────────
+# Required non-Python tools (must be installed separately)
+# ─────────────────────────────────────────────
+
+# nlm — NotebookLM CLI
+# https://github.com/notebooklm/nbml  (or: pip install nbml / npm install -g @notebooklm/nbml)
+# Verify: nlm --version
+
+# gog — Email CLI (Google Gmail sender)
+# https://github.com/笔记/...  (homebrew: brew install ...)
+# Or: go install github.com/.../gog@latest
+# Verify: gog --version

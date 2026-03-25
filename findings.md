@@ -1,0 +1,22 @@
+# Findings
+
+- 技能入口是 `scripts/hot_trends.py`，没有发现 `pytest`/`unittest` 测试文件。
+- 聚合逻辑在 `scripts/lib/aggregator.py`，会把筛选后的所有标题直接拼进单次 LLM prompt。
+- 渲染逻辑在 `scripts/lib/renderer.py`，HTML 模板包含硬编码金融 ticker，与“热搜简报”主题不完全匹配。
+- 本地静态检查通过：`python3 -m py_compile ...` 成功。
+- 基础导入测试通过：`scripts.hot_trends`、`scripts.lib.*`、`scripts.scrapers.*` 均可导入。
+- 沙箱内端到端测试失败路径可复现：DNS 受限时多个抓取器回退为 mock，Playwright 启动被系统权限拒绝，最终因 `MIN_PER_PLATFORM=20` 清空全部数据后直接退出。
+- 沙箱外真实端到端测试中，抓取阶段表现为：
+  - `weibo` 50 条
+  - `reddit` 50 条
+  - `toutiao` 9 条
+  - `douyin` 50 条
+  - `bilibili` 50 条
+  - `youtube` 20 条
+  - `twitter` 15 秒超时后只回退 1 条 mock
+  - `google_news` 38 条
+- 同一环境下，极短 LLM 调用约 4.04 秒返回；但 `aggregate_topics()` 在真实数据和 8 条小样本上都长时间无结果，说明慢点主要在聚合 prompt 设计与输出约束，而不是接口连通性本身。
+- `scripts/scrapers/cn/__init__.py` 与 `scripts/scrapers/en/__init__.py` 都是串行 `for` 循环逐个平台 `Process.join(timeout=...)`，组内并没有并发。
+- `scripts/scrapers/en/github.py` 把查询日期硬编码为 `created:>2026-03-01`，会随时间快速失真。
+- `SKILL.md` 和 `scripts/scrapers/en/twitter.py` 中存在硬编码 API Key / Cookie，属于高风险配置方式。
+- 从 `stdin` 执行依赖 `multiprocessing` 的诊断脚本会触发 `FileNotFoundError: <stdin>`，说明当前实现对运行入口形式较脆弱，不利于测试和调度。
