@@ -3,6 +3,7 @@ playwright
 requests
 feedparser
 beautifulsoup4
+lxml
 
 # ─────────────────────────────────────────────
 # Required non-Python tools (must be installed separately)
