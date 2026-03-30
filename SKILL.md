@@ -21,13 +21,23 @@ user-invocable: true
 }
 ```
 
-cron 包装脚本 `cron_wrapper.sh` 会自动从该文件读取并传给脚本，无需环境变量。
+修改后无需其他操作，脚本启动时自动读取。
 
 ## 执行步骤
 
-1. **生成简报**：在 officemaster 环境下运行 `cd /home/michael/.openclaw/agents/officemaster/skills/hot-trends-skill && .venv/bin/python3 scripts/hot_trends.py --html --output /tmp/hot-trends-daily.html --run-dir /tmp/hot-trends-$(date +%Y%m%d)`
-2. **确认产物**：检查 `~/.openclaw/workspace/outbound_media/hot_trends_artifacts.json`，读取 `channel_text_path` 和 `channel_media_path`
-3. **确认发送**：脚本会读取 `HOT_TRENDS_FEISHU_TARGET`，直接调用 `openclaw message send --channel feishu` 发送文本与图片；无需额外 announce 步骤
+**一行命令直接运行**（脚本会自动读取 `config.json` 中的飞书目标）：
+
+```bash
+cd /home/michael/.openclaw/agents/officemaster/skills/hot-trends-skill && \
+FEISHU_TARGET=$(python3 -c "import json; print(json.load(open('config.json'))['feishu_target'])") \
+HOT_TRENDS_FEISHU_TARGET="$FEISHU_TARGET" \
+.venv/bin/python3 scripts/hot_trends.py \
+    --html \
+    --output /tmp/hot-trends-daily.html \
+    --run-dir /tmp/hot-trends-$(date +%Y%m%d)
+```
+
+脚本执行流程：并行抓取热搜 → NotebookLM 聚合归纳 → 直接发送飞书消息 → 发送邮件。整个过程无需人工介入。
 
 ## 平台覆盖
 
