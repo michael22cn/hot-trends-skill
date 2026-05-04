@@ -70,6 +70,41 @@ def _run_nlm(args: List[str], timeout: int = 180) -> subprocess.CompletedProcess
     )
 
 
+def _is_transient_nlm_error(proc: subprocess.CompletedProcess) -> bool:
+    combined = f"{proc.stdout}\n{proc.stderr}".lower()
+    needles = (
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "client.timeout exceeded while awaiting headers",
+        "request failed",
+        "connection reset",
+        "timed out",
+        "temporary failure",
+        "unexpected eof while reading",
+    )
+    return any(needle in combined for needle in needles)
+
+
+def _run_nlm_with_retries(
+    args: List[str],
+    timeout: int = 180,
+    retries: int = 3,
+    retry_delay: int = 10,
+) -> subprocess.CompletedProcess:
+    last_proc = None
+    for attempt in range(1, retries + 1):
+        proc = _run_nlm(args, timeout=timeout)
+        last_proc = proc
+        if proc.returncode == 0:
+            return proc
+        if attempt >= retries or not _is_transient_nlm_error(proc):
+            return proc
+        _log("NLM", f"transient failure, retry {attempt}/{retries}: {(proc.stderr or proc.stdout).strip()[:300]}")
+        time.sleep(retry_delay)
+    return last_proc
+
+
 def _extract_uuid(text: str) -> Optional[str]:
     match = re.search(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -282,12 +317,14 @@ def _nlm_source_upload_workers(file_specs: List[Dict[str, str]]) -> int:
             return max(1, min(int(configured), len(file_specs)))
         except ValueError:
             pass
-    return len(file_specs)
+    # NotebookLM source ingestion is prone to 502 when many files are uploaded
+    # simultaneously. Keep default conservative; env can override.
+    return min(2, len(file_specs))
 
 
 def _add_source_to_notebook(notebook_id: str, block: Dict[str, str]) -> Dict[str, str]:
     _log("NLM", f"upload start: {block['display_title']} -> notebook {notebook_id}")
-    add_proc = _run_nlm(
+    add_proc = _run_nlm_with_retries(
         [
             "source",
             "add",
@@ -299,6 +336,8 @@ def _add_source_to_notebook(notebook_id: str, block: Dict[str, str]) -> Dict[str
             "--wait",
         ],
         timeout=240,
+        retries=4,
+        retry_delay=12,
     )
     if add_proc.returncode != 0:
         raise RuntimeError(
@@ -379,7 +418,7 @@ def _infographic_focus_title() -> str:
 
 
 def _start_infographic_generation(notebook_id: str) -> Optional[str]:
-    create_proc = _run_nlm(
+    create_proc = _run_nlm_with_retries(
         [
             "infographic",
             "create",
@@ -395,6 +434,8 @@ def _start_infographic_generation(notebook_id: str) -> Optional[str]:
             "--confirm",
         ],
         timeout=180,
+        retries=3,
+        retry_delay=12,
     )
     if create_proc.returncode != 0:
         _log("NLM", f"infographic create failed: {create_proc.stderr.strip() or create_proc.stdout.strip()}")
@@ -403,7 +444,7 @@ def _start_infographic_generation(notebook_id: str) -> Optional[str]:
 
 
 def _artifact_status(notebook_id: str, artifact_id: str) -> Optional[str]:
-    status_proc = _run_nlm(["status", "artifacts", notebook_id, "--json"], timeout=120)
+    status_proc = _run_nlm_with_retries(["status", "artifacts", notebook_id, "--json"], timeout=120, retries=2, retry_delay=8)
     if status_proc.returncode != 0:
         return None
     try:
@@ -425,7 +466,7 @@ def _wait_and_download_infographic(notebook_id: str, artifact_id: str, output_di
     while time.time() < deadline:
         status = _artifact_status(notebook_id, artifact_id)
         if status == "completed":
-            download_proc = _run_nlm(
+            download_proc = _run_nlm_with_retries(
                 [
                     "download",
                     "infographic",
@@ -437,10 +478,135 @@ def _wait_and_download_infographic(notebook_id: str, artifact_id: str, output_di
                     "--no-progress",
                 ],
                 timeout=240,
+                retries=3,
+                retry_delay=10,
             )
             if download_proc.returncode == 0 and os.path.exists(output_path):
                 return output_path
             return None
+        if status in {"failed", "error"}:
+            return None
+        time.sleep(poll_seconds)
+
+    return None
+
+
+def _podcast_focus_prompt() -> str:
+    return "根据社会、游戏、经济、科技四个方面，讨论和串联今天的全球热门话题；用中文播客口吻，突出跨领域关联、共同趋势和风险信号。"
+
+
+def _start_audio_generation(notebook_id: str) -> Optional[str]:
+    create_proc = _run_nlm_with_retries(
+        [
+            "audio",
+            "create",
+            notebook_id,
+            "--format",
+            "deep_dive",
+            "--length",
+            "default",
+            "--language",
+            "zh-CN",
+            "--focus",
+            _podcast_focus_prompt(),
+            "--confirm",
+        ],
+        timeout=180,
+        retries=3,
+        retry_delay=12,
+    )
+    if create_proc.returncode != 0:
+        _log("NLM", f"audio create failed: {create_proc.stderr.strip() or create_proc.stdout.strip()}")
+        return None
+    return _extract_uuid(create_proc.stdout + "\n" + create_proc.stderr)
+
+
+def _nlm_tool_python() -> str:
+    nlm_path = shutil.which("nlm") or ""
+    if not nlm_path or not os.path.isfile(nlm_path):
+        return ""
+    try:
+        first = open(nlm_path, "r", encoding="utf-8").readline().strip()
+    except OSError:
+        return ""
+    if first.startswith("#!"):
+        candidate = first[2:].strip().split()[0]
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def _download_audio_via_python_api(notebook_id: str, artifact_id: str, output_path: str) -> bool:
+    """Fallback for nlm CLI audio download; CLI can fail while Python API succeeds.
+    Credentials (cookies) expire over time — refresh with `nlm login` before downloading.
+    """
+    py = _nlm_tool_python()
+    if not py:
+        return False
+    # Refresh credentials to avoid httpx.ReadTimeout on download
+    login_proc = subprocess.run(
+        ["nlm", "login"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if login_proc.returncode != 0:
+        _log("NLM", f"audio: nlm login refresh failed, continuing anyway: {login_proc.stderr.strip()[:100]}")
+    code = """
+import os
+from notebooklm_tools.cli.utils import get_client
+nb = os.environ['NLM_NOTEBOOK_ID']
+aid = os.environ['NLM_ARTIFACT_ID']
+out = os.environ['NLM_OUTPUT_PATH']
+with get_client() as client:
+    path = client.download_audio(nb, out, artifact_id=aid)
+print(path)
+"""
+    env = os.environ.copy()
+    env.update({"NLM_NOTEBOOK_ID": notebook_id, "NLM_ARTIFACT_ID": artifact_id, "NLM_OUTPUT_PATH": output_path})
+    proc = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=300, env=env)
+    if proc.returncode != 0:
+        _log("NLM", f"audio python fallback failed: {(proc.stderr or proc.stdout).strip()[:300]}")
+        return False
+    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+
+def _wait_and_download_audio(notebook_id: str, artifact_id: str, output_dir: str) -> Optional[str]:
+    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_WAIT", "1800"))
+    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_POLL", "20"))
+    deadline = time.time() + wait_seconds
+    output_path = os.path.join(output_dir, f"{notebook_id}_podcast.m4a")
+
+    while time.time() < deadline:
+        status = _artifact_status(notebook_id, artifact_id)
+        if status == "completed":
+            # 1. Try nlm CLI
+            download_proc = _run_nlm_with_retries(
+                [
+                    "download",
+                    "audio",
+                    notebook_id,
+                    "--id",
+                    artifact_id,
+                    "--output",
+                    output_path,
+                    "--no-progress",
+                ],
+                timeout=300,
+                retries=3,
+                retry_delay=10,
+            )
+            if download_proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                _log("NLM", f"audio CLI download succeeded")
+                return output_path
+            _log("NLM", f"audio CLI download failed, trying Python fallback")
+
+            # 2. Fallback: Python API (same approach as finance-video-brief)
+            if _download_audio_via_python_api(notebook_id, artifact_id, output_path):
+                return output_path
+
+            # 3. CLI + Python both failed — wait and retry (do not return None immediately)
+            _log("NLM", "audio download failed on this attempt; will retry...")
+            time.sleep(poll_seconds)
+            continue
         if status in {"failed", "error"}:
             return None
         time.sleep(poll_seconds)
@@ -460,7 +626,7 @@ def _query_via_nlm(items: List[Dict]) -> Dict:
     try:
         if not notebook_id:
             _log("NLM", "creating scratch notebook")
-            create_proc = _run_nlm(["notebook", "create", _scratch_notebook_title()])
+            create_proc = _run_nlm_with_retries(["notebook", "create", _scratch_notebook_title()], retries=3, retry_delay=10)
             if create_proc.returncode != 0:
                 raise RuntimeError(
                     f"NotebookLM 创建 notebook 失败: {create_proc.stderr.strip() or create_proc.stdout.strip()}"
@@ -494,12 +660,14 @@ def _query_via_nlm(items: List[Dict]) -> Dict:
 
         _log("NLM", "start infographic generation")
         infographic_artifact_id = _start_infographic_generation(notebook_id)
+        _log("NLM", "start podcast audio generation")
+        audio_artifact_id = _start_audio_generation(notebook_id)
 
         topics = []
         references = []
         for category_key, category_label in CATEGORY_SPECS:
             _log("QUERY", f"start {category_key} query: notebook={notebook_id} timeout={query_timeout}s")
-            summary_proc = _run_nlm(
+            summary_proc = _run_nlm_with_retries(
                 [
                     "notebook",
                     "query",
@@ -510,6 +678,8 @@ def _query_via_nlm(items: List[Dict]) -> Dict:
                     str(query_timeout),
                 ],
                 timeout=query_subprocess_timeout,
+                retries=3,
+                retry_delay=15,
             )
             if summary_proc.returncode != 0:
                 raise RuntimeError(
@@ -533,20 +703,18 @@ def _query_via_nlm(items: List[Dict]) -> Dict:
         title = f"全球热点分类简报 | {date.today().strftime('%Y年%m月%d日')}"
         _log("QUERY", f"parsed briefing: title={title}, topics={len(topics)}, references={len(references)}")
 
-        infographic_path = ""
         if infographic_artifact_id:
-            _log("NLM", f"waiting for infographic artifact: {infographic_artifact_id}")
-            infographic_path = _wait_and_download_infographic(notebook_id, infographic_artifact_id, tempfile.gettempdir()) or ""
-            if infographic_path:
-                _log("NLM", f"infographic downloaded: {infographic_path}")
-            else:
-                _log("NLM", "infographic unavailable")
+            _log("NLM", f"infographic artifact pending: {infographic_artifact_id}")
+            _log("NLM", "infographic deferred to image sub-agent")
 
         return {
             "title": title,
             "topics": topics,
             "references": references,
-            "infographic_path": infographic_path,
+            "infographic_artifact_id": infographic_artifact_id or "",
+            "infographic_notebook_id": notebook_id or "",
+            "audio_artifact_id": audio_artifact_id or "",
+            "audio_notebook_id": notebook_id or "",
             "notebook_id": notebook_id,
             "notebook_url": f"https://notebooklm.google.com/notebook/{notebook_id}" if notebook_id else "",
         }

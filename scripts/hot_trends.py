@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import mimetypes
 import os
+import time
 import shutil
 import subprocess
 import sys
@@ -49,6 +51,12 @@ SINGLE_CHANNELS = {
 
 ALL_CHANNELS = SINGLE_CHANNELS
 DEFAULT_EMAIL_TO = "674080@qq.com"
+SKILL_DIR = Path(__file__).resolve().parents[1]
+SKILL_CONFIG_PATH = SKILL_DIR / "config.json"
+PUSH_TARGETS_PATH = SKILL_DIR / "config" / "push_targets.json"
+HERMES_CONFIG_PATH = Path.home() / ".hermes" / "config.yaml"
+HERMES_STATE_DIR = Path.home() / ".hermes" / "state" / "hot-trends-brief"
+HERMES_OUTBOUND_DIR = Path.home() / ".hermes" / "workspace" / "outbound_media"
 
 
 def log(stage, message):
@@ -56,22 +64,23 @@ def log(stage, message):
     print(f"[{timestamp}] [{stage}] {message}")
 
 
-def write_artifacts_for_channel(text_path, media_path, run_dir):
-    """将投递产物路径写入 last_run_artifacts.json，供 openclaw announce 机制拾取"""
+def write_artifacts_for_channel(text_path, media_path, run_dir, audio_path=None):
+    """将投递产物路径写入 last_run_artifacts.json，并同步到 Hermes 稳定路径。"""
     import json
     artifacts = {
         "status": "ok",
         "run_dir": str(run_dir),
         "channel_text_path": str(text_path),
         "channel_media_path": str(media_path) if media_path else None,
+        "channel_audio_path": str(audio_path) if audio_path else None,
     }
     artifacts_path = Path(run_dir) / "last_run_artifacts.json"
     artifacts_path.parent.mkdir(parents=True, exist_ok=True)
     with artifacts_path.open("w", encoding="utf-8") as f:
         json.dump(artifacts, f, indent=2, ensure_ascii=False)
     log("OUTPUT", f"artifacts written to {artifacts_path}")
-    # 同时写到固定位置供 announce 拾取
-    stable_path = Path.home() / ".openclaw" / "workspace" / "outbound_media" / "hot_trends_artifacts.json"
+
+    stable_path = HERMES_OUTBOUND_DIR / "hot_trends_artifacts.json"
     stable_path.parent.mkdir(parents=True, exist_ok=True)
     with stable_path.open("w", encoding="utf-8") as f:
         json.dump(artifacts, f, indent=2, ensure_ascii=False)
@@ -101,8 +110,16 @@ def send_email_via_gog(subject, body, html_body="", attachments=None, to_address
         if attachment:
             cmd.extend(["--attach", attachment])
 
+    env = os.environ.copy()
+    gog_account = os.getenv("GOG_ACCOUNT") or os.getenv("HOT_TRENDS_GOG_ACCOUNT")
+    if gog_account:
+        env["GOG_ACCOUNT"] = gog_account
+    gog_keyring = os.getenv("GOG_KEYRING_PASSWORD") or os.getenv("HOT_TRENDS_GOG_KEYRING_PASSWORD")
+    if gog_keyring:
+        env["GOG_KEYRING_PASSWORD"] = gog_keyring
+
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     finally:
         try:
             os.unlink(body_file)
@@ -110,17 +127,71 @@ def send_email_via_gog(subject, body, html_body="", attachments=None, to_address
             pass
 
 
+def _load_skill_config() -> dict:
+    if not SKILL_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(SKILL_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        log("CONFIG", f"failed to parse {SKILL_CONFIG_PATH}: {e}")
+        return {}
+
+
+def _load_push_targets() -> dict:
+    """Load push_targets.json (channels config). Returns {'channels': [...]} or empty dict."""
+    if not PUSH_TARGETS_PATH.exists():
+        return {}
+    try:
+        return json.loads(PUSH_TARGETS_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        log("CONFIG", f"failed to parse {PUSH_TARGETS_PATH}: {e}")
+        return {}
+
+
 def _load_feishu_config():
-    cfg_path = Path.home() / ".openclaw" / "openclaw.json"
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    feishu = ((cfg.get("channels") or {}).get("feishu") or {})
-    app_id = (feishu.get("appId") or "").strip()
-    app_secret = (feishu.get("appSecret") or "").strip()
-    domain = (feishu.get("domain") or "open.feishu.cn").strip()
+    if not HERMES_CONFIG_PATH.exists():
+        raise RuntimeError(f"Hermes config not found: {HERMES_CONFIG_PATH}")
+
+    app_id = ""
+    app_secret = ""
+    domain = "open.feishu.cn"
+    section = []
+
+    for raw_line in HERMES_CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+
+        while section and indent <= section[-1][1]:
+            section.pop()
+
+        if stripped.endswith(":"):
+            key = stripped[:-1].strip()
+            section.append((key, indent))
+            continue
+
+        if ":" not in stripped:
+            continue
+
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        path = [name for name, _ in section] + [key]
+
+        if path == ["platforms", "feishu", "extra", "app_id"]:
+            app_id = value
+        elif path == ["platforms", "feishu", "extra", "app_secret"]:
+            app_secret = value
+        elif path == ["platforms", "feishu", "extra", "domain"]:
+            domain = value or domain
+
     if domain in {"feishu", "lark", "openclaw"} or "." not in domain:
         domain = "open.feishu.cn"
     if not app_id or not app_secret:
-        raise RuntimeError("Feishu appId/appSecret not configured in ~/.openclaw/openclaw.json")
+        raise RuntimeError(f"Feishu app_id/app_secret not configured in {HERMES_CONFIG_PATH}")
     return {"app_id": app_id, "app_secret": app_secret, "domain": domain}
 
 
@@ -166,8 +237,9 @@ def _send_feishu_text(token: str, domain: str, chat_id: str, text: str):
 
 def _upload_feishu_image(token: str, domain: str, image_path: str) -> str:
     url = f"https://{domain}/open-apis/im/v1/images"
+    mime = mimetypes.guess_type(image_path)[0] or "image/jpeg"
     with open(image_path, "rb") as f:
-        files = {"image": (Path(image_path).name, f, "image/png")}
+        files = {"image": (Path(image_path).name, f, mime)}
         data = {"image_type": "message"}
         resp = requests.post(url, headers=_feishu_headers(token), data=data, files=files, timeout=180)
     resp.raise_for_status()
@@ -192,17 +264,46 @@ def _send_feishu_image(token: str, domain: str, chat_id: str, image_key: str):
     return data
 
 
-def send_feishu_via_openclaw(text, media_path=None, target=None):
-    """Send text + image directly via Feishu Open API.
+def _upload_feishu_file(token: str, domain: str, file_path: str) -> str:
+    url = f"https://{domain}/open-apis/im/v1/files"
+    file_name = Path(file_path).name
+    mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    with open(file_path, "rb") as f:
+        files = {"file": (file_name, f, mime)}
+        data = {"file_type": "stream", "file_name": file_name}
+        resp = requests.post(url, headers=_feishu_headers(token), data=data, files=files, timeout=300)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("code") != 0:
+        raise RuntimeError(f"Feishu file upload failed: {result.get('msg') or result}")
+    return result["data"]["file_key"]
 
-    Why direct API instead of `openclaw message send`:
-    - Feishu text sends work via CLI
-    - but CLI send currently ignores/blocks media in the generic send action path,
-      causing only the caption text to appear in chat.
-    """
-    raw_target = (target or os.getenv("HOT_TRENDS_FEISHU_TARGET", "")).strip()
+
+def _send_feishu_file(token: str, domain: str, chat_id: str, file_key: str, file_name: str = ""):
+    url = f"https://{domain}/open-apis/im/v1/messages"
+    payload = {
+        "receive_id": chat_id,
+        "msg_type": "file",
+        "content": json.dumps({"file_key": file_key, "file_name": file_name}, ensure_ascii=False),
+    }
+    resp = requests.post(url, params={"receive_id_type": "chat_id"}, headers={**_feishu_headers(token), "Content-Type": "application/json; charset=utf-8"}, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"Feishu file send failed: {data.get('msg') or data}")
+    return data
+
+
+def send_feishu_direct(text, media_path=None, audio_path=None, target=None):
+    """Send text + image + optional audio file directly via Feishu Open API."""
+    skill_cfg = _load_skill_config()
+    raw_target = (
+        target
+        or os.getenv("HOT_TRENDS_FEISHU_TARGET", "")
+        or skill_cfg.get("feishu_target", "")
+    ).strip()
     if not raw_target:
-        log("FEISHU", "skip send: HOT_TRENDS_FEISHU_TARGET is empty")
+        log("FEISHU", f"skip send: no target configured (env HOT_TRENDS_FEISHU_TARGET / {SKILL_CONFIG_PATH})")
         return True
 
     chat_id = _normalize_feishu_chat_target(raw_target)
@@ -217,7 +318,69 @@ def send_feishu_via_openclaw(text, media_path=None, target=None):
         _send_feishu_image(token, cfg["domain"], chat_id, image_key)
         log("FEISHU", f"media sent to chat:{chat_id}: {media_path}")
 
+    if audio_path and os.path.isfile(audio_path):
+        try:
+            file_key = _upload_feishu_file(token, cfg["domain"], audio_path)
+            _send_feishu_file(token, cfg["domain"], chat_id, file_key, Path(audio_path).name)
+            log("FEISHU", f"podcast sent to chat:{chat_id}: {audio_path}")
+        except Exception as e:
+            log("FEISHU", f"podcast skipped: {type(e).__name__}: {e}")
+
     return True
+
+
+import base64
+import uuid
+
+import requests
+
+
+def send_discord_webhook(webhook_url: str, text: str, image_path: str = None) -> bool:
+    """Send text + optional image via Discord Webhook (multipart/form-data).
+    Handles long text by splitting into multiple messages (Discord limit: 2000 chars)."""
+    try:
+        # Split text into chunks of 1900 chars (leaving room for safety margin)
+        CHUNK_SIZE = 1900
+        chunks = []
+        for i in range(0, len(text), CHUNK_SIZE):
+            chunks.append(text[i : i + CHUNK_SIZE])
+
+        sent_any = False
+        for idx, chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                chunk = f"[{idx + 1}/{len(chunks)}]\n{chunk}"
+            if image_path and os.path.isfile(image_path) and idx == 0:
+                # Only send image with the first chunk
+                img_bytes = open(image_path, "rb").read()
+                boundary = f"==={uuid.uuid4().hex}==="
+                mime = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+                filename = Path(image_path).name
+                parts = [
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n{chunk}\r\n".encode(),
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\nContent-Transfer-Encoding: base64\r\n\r\n{base64.b64encode(img_bytes).decode()}\r\n".encode(),
+                    f"--{boundary}--\r\n".encode(),
+                ]
+                resp = requests.post(
+                    webhook_url,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                    data=b"".join(parts),
+                    timeout=60,
+                )
+            else:
+                resp = requests.post(
+                    webhook_url,
+                    json={"content": chunk},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+            if resp.status_code in (200, 204):
+                sent_any = True
+            else:
+                log("DISCORD", f"chunk {idx+1} failed: status={resp.status_code} body={resp.text[:100]}")
+        return sent_any
+    except Exception as e:
+        log("DISCORD", f"webhook error: {type(e).__name__}: {e}")
+        return False
 
 
 def fetch_group(name, fn):
@@ -231,7 +394,7 @@ def fetch_group(name, fn):
         return name, []
 
 
-RETRY_STATE_FILE = Path.home() / ".openclaw" / "workspace" / "hot_trends_retry_state.json"
+RETRY_STATE_FILE = HERMES_STATE_DIR / "retry_state.json"
 MAX_RETRY_HOURS = 3  # 最多尝试3次（00:00 / 01:00 / 02:00）
 
 
@@ -283,6 +446,30 @@ def _mark_succeeded():
     log("RETRY", f"标记今日简报为已发送成功")
 
 
+def _prepare_image_for_delivery(image_path: str, output_dir: Path) -> str:
+    """Convert large NotebookLM PNG infographic to compact JPEG for delivery."""
+    if not image_path or not os.path.isfile(image_path):
+        return ""
+    ffmpeg = shutil.which("ffmpeg")
+    max_bytes = int(os.getenv("HOT_TRENDS_IMAGE_MAX_BYTES", str(1024 * 1024)))
+    if os.path.getsize(image_path) <= max_bytes and Path(image_path).suffix.lower() in {".jpg", ".jpeg"}:
+        return image_path
+    if not ffmpeg:
+        log("OUTPUT", "ffmpeg missing; keep original infographic")
+        return image_path
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / "hot_trends_infographic.jpg"
+    max_width = os.getenv("HOT_TRENDS_IMAGE_MAX_WIDTH", "1800")
+    quality = os.getenv("HOT_TRENDS_IMAGE_JPEG_Q", "3")
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", image_path, "-vf", f"scale='min({max_width},iw)':-2", "-q:v", quality, str(out)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if proc.returncode == 0 and out.exists() and out.stat().st_size > 0:
+        log("OUTPUT", f"infographic converted for delivery: {out} ({out.stat().st_size} bytes)")
+        return str(out)
+    log("OUTPUT", f"infographic conversion failed: {(proc.stderr or proc.stdout).strip()[:300]}")
+    return image_path
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -297,11 +484,11 @@ def main():
     )
     parser.add_argument(
         "--feishu-target",
-        help="飞书群目标 ID（已被废弃，保留仅防报错）",
+        help="飞书群目标 ID（可选；默认读取 HOT_TRENDS_FEISHU_TARGET 或 skill config.json）",
     )
     parser.add_argument(
         "--run-dir",
-        help="运行目录，用于存放产物文件（供 openclaw announce 拾取）",
+        help="运行目录，用于存放产物文件和本次执行输出",
     )
     parser.add_argument(
         "--no-retry",
@@ -364,20 +551,36 @@ def main():
         sys.exit(1)
 
     log("RUN", f"start NotebookLM aggregation with {len(all_items)} items")
-    try:
-        topics_data = aggregate_topics(all_items, failed_platforms if not args.channel else [])
-    except Exception as e:
-        log("RUN", f"NotebookLM aggregation failed: {e}")
+    topics_data = None
+    nlm_error = None
+    for attempt in range(1, 4):
+        try:
+            topics_data = aggregate_topics(all_items, failed_platforms if not args.channel else [])
+            break
+        except Exception as e:
+            nlm_error = e
+            log("RUN", f"NotebookLM aggregation attempt {attempt}/3 failed: {e}")
+            if attempt < 3:
+                wait = int(os.getenv("HOT_TRENDS_NLM_OUTER_RETRY_WAIT", "60"))
+                log("RUN", f"retrying in {wait}s...")
+                time.sleep(wait)
+    if topics_data is None:
+        log("RUN", f"NotebookLM aggregation failed after 3 attempts: {nlm_error}")
+        log("RUN", "critical path failed — skipping delivery (no partial results)")
         sys.exit(2)
 
     email_subject = topics_data.get("title") or f"全球热点简报 {datetime.now().strftime('%Y-%m-%d')}"
     email_body = render_briefing(topics_data)
-    email_html_body = render_briefing_email_html(topics_data)
+    email_topics_data = dict(topics_data)
+    email_topics_data.pop("audio_path", None)
+    email_topics_data.pop("audio_artifact_id", None)
+    email_topics_data.pop("audio_notebook_id", None)
+    email_html_body = render_briefing_email_html(email_topics_data)
     attachments = []
-    infographic_path = (topics_data.get("infographic_path") or "").strip()
-    if infographic_path:
-        attachments.append(infographic_path)
-        log("OUTPUT", f"infographic attachment queued: {infographic_path}")
+    # infographic 由独立图片sub-agent处理，主流程不打包
+
+    audio_artifact_id = (topics_data.get("audio_artifact_id") or "").strip()
+    audio_notebook_id = (topics_data.get("audio_notebook_id") or "").strip()
 
     if args.html:
         log("OUTPUT", "rendering HTML briefing")
@@ -400,7 +603,7 @@ def main():
             log("OUTPUT", "printing markdown briefing to stdout")
             print("\n" + email_body)
 
-    # ---- 写入 artifacts（供 openclaw announce 拾取）----
+    # ---- 写入 artifacts ----
     run_dir = args.run_dir or os.getenv("HOT_TRENDS_RUN_DIR", "").strip() or tempfile.mkdtemp(prefix="hot-trends-")
     text_path = Path(run_dir) / "briefing.md"
     text_path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,45 +611,109 @@ def main():
         f.write(email_body)
     log("OUTPUT", f"briefing text saved to {text_path}")
 
-    # Stage infographic to outbound_media for announce拾取
-    staged_media = None
-    if infographic_path and os.path.isfile(infographic_path):
-        outbound_dir = Path.home() / ".openclaw" / "workspace" / "outbound_media"
-        outbound_dir.mkdir(parents=True, exist_ok=True)
-        staged_media = outbound_dir / "hot_trends_infographic.png"
-        shutil.copy2(infographic_path, staged_media)
-        log("OUTPUT", f"infographic staged to {staged_media}")
-
-    write_artifacts_for_channel(text_path, staged_media, run_dir)
+    write_artifacts_for_channel(text_path, None, run_dir, None)
     # ---- artifacts 写入完成 ----
 
-    # 直接发送到飞书（修复：不再依赖不存在的 announce 自动拾取流程）
+    delivery_succeeded = False
+
+    # 直接发送到飞书（文字）
     feishu_target = (os.getenv("HOT_TRENDS_FEISHU_TARGET", "") or args.feishu_target or "").strip()
-    if feishu_target:
-        log("FEISHU", f"start sending to {feishu_target}")
-        feishu_ok = send_feishu_via_openclaw(email_body, media_path=str(staged_media) if staged_media else None, target=feishu_target)
+    effective_feishu_target = feishu_target or _load_skill_config().get("feishu_target", "")
+    if effective_feishu_target:
+        log("FEISHU", f"start sending text to {effective_feishu_target}")
+        feishu_ok = send_feishu_direct(
+            email_body,
+            media_path=None,
+            audio_path=None,
+            target=effective_feishu_target,
+        )
         if not feishu_ok:
             log("FEISHU", "send failed")
         else:
             log("FEISHU", "send completed")
-            _mark_succeeded()
+            delivery_succeeded = True
     else:
-        log("FEISHU", "skip send: no HOT_TRENDS_FEISHU_TARGET provided")
+        log("FEISHU", "skip send: no Feishu target provided or configured")
 
+    # ---- Discord 文字发送 ----
+    discord_webhook = os.getenv("HOT_TRENDS_DISCORD_WEBHOOK", "").strip()
+    if not discord_webhook:
+        push_targets = _load_push_targets()
+        for ch in push_targets.get("channels", []):
+            if ch.get("channel") == "discord":
+                discord_webhook = ch.get("webhook_url", "")
+                break
+    if discord_webhook:
+        log("DISCORD", f"start sending text to Discord")
+        discord_ok = send_discord_webhook(discord_webhook, email_body, None)
+        if discord_ok:
+            log("DISCORD", "send completed")
+            delivery_succeeded = True
+        else:
+            log("DISCORD", "send failed")
+    else:
+        log("DISCORD", "skip send: no HOT_TRENDS_DISCORD_WEBHOOK provided")
+
+    # ---- 并行写图片+音频任务文件 ----
+    import json as _json
+
+    # 图片任务
+    img_artifact_id = (topics_data.get("infographic_artifact_id") or "").strip()
+    img_notebook_id = (topics_data.get("infographic_notebook_id") or "").strip()
+    img_task_file = HERMES_OUTBOUND_DIR / "image_task.json"
+    if img_artifact_id and img_notebook_id:
+        HERMES_OUTBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        with open(img_task_file, "w", encoding="utf-8") as f:
+            _json.dump({
+                "artifact_id": img_artifact_id,
+                "notebook_id": img_notebook_id,
+                "feishu_target": effective_feishu_target,
+                "discord_webhook": discord_webhook,
+                "output_path": str(HERMES_OUTBOUND_DIR / "hot_trends_infographic.jpg"),
+            }, f, ensure_ascii=False)
+        log("IMAGE", f"image task queued: {img_task_file}")
+
+    # 音频任务
+    aud_artifact_id = (topics_data.get("audio_artifact_id") or "").strip()
+    aud_notebook_id = (topics_data.get("audio_notebook_id") or "").strip()
+    aud_task_file = HERMES_OUTBOUND_DIR / "audio_task.json"
+    if aud_artifact_id and aud_notebook_id:
+        HERMES_OUTBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        with open(aud_task_file, "w", encoding="utf-8") as f:
+            _json.dump({
+                "artifact_id": aud_artifact_id,
+                "notebook_id": aud_notebook_id,
+                "feishu_target": effective_feishu_target,
+                "discord_webhook": discord_webhook,
+                "output_path": str(HERMES_OUTBOUND_DIR / "hot_trends_podcast.mp3"),
+            }, f, ensure_ascii=False)
+        log("AUDIO", f"audio task queued: {aud_task_file}")
+
+    # ---- 邮件：纯文字，无附件 ----
     email_to = os.getenv("HOT_TRENDS_EMAIL_TO", DEFAULT_EMAIL_TO).strip() or DEFAULT_EMAIL_TO
-    log("EMAIL", f"start sending email via gog to {email_to}")
-    email_proc = send_email_via_gog(
-        email_subject,
-        email_body,
-        html_body=email_html_body,
-        attachments=attachments,
-        to_address=email_to,
-    )
-    if email_proc.returncode != 0:
-        log("EMAIL", f"email send failed: {email_proc.stderr.strip() or email_proc.stdout.strip()}")
-        # 邮件失败不影响主流程（飞书已优先发送）
+    log("EMAIL", f"start sending text email to {email_to}")
+    email_proc = None
+    for attempt in range(3):
+        email_proc = send_email_via_gog(
+            email_subject,
+            email_body,
+            html_body="",
+            attachments=[],
+            to_address=email_to,
+        )
+        if email_proc.returncode == 0:
+            break
+        log("EMAIL", f"email send attempt {attempt + 1} failed, retrying in 30s...")
+        time.sleep(30)
+    if email_proc and email_proc.returncode != 0:
+        log("EMAIL", f"email send failed after 3 attempts: {email_proc.stderr.strip() or email_proc.stdout.strip()}")
     else:
         log("EMAIL", f"email sent successfully to {email_to}")
+
+    if delivery_succeeded:
+        _mark_succeeded()
+    else:
+        log("RETRY", "no primary delivery channel succeeded; keep retry state open")
 
 
 if __name__ == "__main__":
