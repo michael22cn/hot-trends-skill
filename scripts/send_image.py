@@ -61,10 +61,13 @@ def _load_feishu_config():
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     feishu = cfg.get("platforms", {}).get("feishu", {}).get("extra", {})
+    domain = feishu.get("domain", "open.feishu.cn")
+    if domain in {"feishu", "lark", "openclaw"} or "." not in domain:
+        domain = "open.feishu.cn"
     return {
         "app_id": feishu.get("app_id", ""),
         "app_secret": feishu.get("app_secret", ""),
-        "domain": feishu.get("domain", "open.feishu.cn"),
+        "domain": domain,
     }
 
 

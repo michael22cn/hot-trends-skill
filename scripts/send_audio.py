@@ -47,8 +47,10 @@ def _nlm_status(notebook_id, artifact_id):
 
 
 def _nlm_download_audio(notebook_id, artifact_id, output_path):
+    # NOTE: do NOT pass --id; nlm CLI requires notebook-level download,
+    # and passing --id with a specific artifact_id causes "Download failed for audio"
     proc = _run_nlm(
-        ["download", "audio", notebook_id, "--id", artifact_id,
+        ["download", "audio", notebook_id,
          "--output", output_path, "--no-progress"],
         timeout=300,
     )
@@ -101,10 +103,13 @@ def _load_feishu_config():
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     feishu = cfg.get("platforms", {}).get("feishu", {}).get("extra", {})
+    domain = feishu.get("domain", "open.feishu.cn")
+    if domain in {"feishu", "lark", "openclaw"} or "." not in domain:
+        domain = "open.feishu.cn"
     return {
         "app_id": feishu.get("app_id", ""),
         "app_secret": feishu.get("app_secret", ""),
-        "domain": feishu.get("domain", "open.feishu.cn"),
+        "domain": domain,
     }
 
 
@@ -224,12 +229,21 @@ def compress_audio(input_path, output_path):
         log("AUDIO", "ffmpeg missing, copying original")
         shutil.copy2(input_path, output_path)
         return output_path
+    # Always output to a temp file first to avoid input==output conflict
+    tmp_path = output_path + ".tmp"
+    fmt = "mp3" if Path(output_path).suffix == ".mp3" else None
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-           "-i", input_path, "-vn", "-ac", "1", "-ar", "22050", "-b:a", "32k", output_path]
+           "-i", input_path, "-vn", "-ac", "1", "-ar", "22050", "-b:a", "32k"]
+    if fmt:
+        cmd += ["-f", fmt]
+    cmd.append(tmp_path)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if proc.returncode == 0 and os.path.exists(output_path):
+    if proc.returncode == 0 and os.path.exists(tmp_path):
+        shutil.move(tmp_path, output_path)
         log("AUDIO", f"compressed: {output_path} ({os.path.getsize(output_path)} bytes)")
         return output_path
+    if os.path.exists(tmp_path):
+        os.unlink(tmp_path)
     log("AUDIO", f"compression failed: {proc.stderr.strip()[:200]}")
     return input_path
 

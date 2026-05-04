@@ -654,10 +654,13 @@ def main():
     else:
         log("DISCORD", "skip send: no HOT_TRENDS_DISCORD_WEBHOOK provided")
 
+    # 日期（用于输出文件名）
+    from datetime import date as _date
+    briefing_date = _date.today().strftime("%Y%m%d")
+
     # ---- 并行写图片+音频任务文件 ----
     import json as _json
 
-    # 图片任务
     img_artifact_id = (topics_data.get("infographic_artifact_id") or "").strip()
     img_notebook_id = (topics_data.get("infographic_notebook_id") or "").strip()
     img_task_file = HERMES_OUTBOUND_DIR / "image_task.json"
@@ -669,7 +672,7 @@ def main():
                 "notebook_id": img_notebook_id,
                 "feishu_target": effective_feishu_target,
                 "discord_webhook": discord_webhook,
-                "output_path": str(HERMES_OUTBOUND_DIR / "hot_trends_infographic.jpg"),
+                "output_path": str(HERMES_OUTBOUND_DIR / f"hot_trends_{briefing_date}_infographic.jpg"),
             }, f, ensure_ascii=False)
         log("IMAGE", f"image task queued: {img_task_file}")
 
@@ -685,7 +688,7 @@ def main():
                 "notebook_id": aud_notebook_id,
                 "feishu_target": effective_feishu_target,
                 "discord_webhook": discord_webhook,
-                "output_path": str(HERMES_OUTBOUND_DIR / "hot_trends_podcast.mp3"),
+                "output_path": str(HERMES_OUTBOUND_DIR / f"hot_trends_{briefing_date}_podcast.m4a"),
             }, f, ensure_ascii=False)
         log("AUDIO", f"audio task queued: {aud_task_file}")
 
