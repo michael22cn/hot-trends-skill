@@ -155,8 +155,8 @@ def send_discord_image(webhook_url, image_path, caption=""):
 
 # ── image processing ───────────────────────────────────────────────────────
 def wait_and_download_infographic(notebook_id, artifact_id, output_path):
-    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_WAIT", "900"))
-    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_POLL", "10"))
+    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_WAIT", "3600"))
+    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_POLL", "60"))
     deadline = time.time() + wait_seconds
 
     while time.time() < deadline:
@@ -231,7 +231,6 @@ def main():
     if state.get("last_artifact_id") == artifact_id:
         log("IMAGE", "already processed this artifact, skipping")
         return 0
-    save_state({"last_artifact_id": artifact_id})
 
     # 1. Download
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -264,6 +263,7 @@ def main():
             log("DISCORD", f"send failed (non-fatal): {type(e).__name__}: {e}")
 
     log("IMAGE", "done")
+    save_state({"last_artifact_id": artifact_id})
     return 0
 
 

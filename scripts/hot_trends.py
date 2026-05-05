@@ -502,6 +502,17 @@ def main():
         if not _check_and_increment_retry():
             return
 
+    # 每次主流程开始先清理旧的媒体任务文件。
+    # 如果本次 NLM 聚合失败，后续 sub-agent 不应继续处理昨天遗留的 image/audio task。
+    if not args.channel:
+        for stale_task in (HERMES_OUTBOUND_DIR / "image_task.json", HERMES_OUTBOUND_DIR / "audio_task.json"):
+            try:
+                if stale_task.exists():
+                    stale_task.unlink()
+                    log("RUN", f"removed stale media task: {stale_task}")
+            except Exception as e:
+                log("RUN", f"failed to remove stale media task {stale_task}: {e}")
+
     if args.channel:
         platform_name, fn = SINGLE_CHANNELS[args.channel]
         log("RUN", f"start single-channel mode: {args.channel}")

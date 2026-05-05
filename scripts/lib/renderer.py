@@ -1,4 +1,7 @@
+import base64
 import html as html_lib
+import mimetypes
+import os
 import re
 from datetime import date
 from typing import Dict
@@ -92,234 +95,189 @@ def render_briefing(data: Dict) -> str:
     return "\n".join(output)
 
 
+def _embed_file_base64(path: str) -> str:
+    if not path or not os.path.isfile(path):
+        return ""
+    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _topic_card_html(topic: Dict, index: int) -> str:
+    title = html_lib.escape(topic.get("title", ""))
+    summary = _summary_to_html(topic.get("summary", ""))
+    citations = " ".join(f"[{num}]" for num in topic.get("citations", [])[:6])
+    citations_html = f'<p class="topic-meta">引用 {html_lib.escape(citations)}</p>' if citations else ""
+    sources = topic.get("sources", []) or []
+    sources_html = ""
+    if sources:
+        chips = "".join(f'<span class="chip">{html_lib.escape(str(src))}</span>' for src in sources[:6])
+        sources_html = f'<div class="chips">{chips}</div>'
+    return f"""
+      <div class="entry topic-card">
+        <p class="topic-index">{index:02d}</p>
+        <h3>{title}</h3>
+        <div class="topic-summary">{summary}</div>
+        {sources_html}
+        {citations_html}
+      </div>
+"""
+
+
 def render_briefing_html(data: Dict) -> str:
-    today = date.today().strftime("%Y年%m月%d日")
+    today = date.today().strftime("%Y-%m-%d")
     report_title = data.get("title", "全球热点日报")
     topics = data.get("topics", [])
     references = data.get("references", [])
     infographic_path = data.get("infographic_path", "")
+    audio_path = data.get("audio_path", "")
     failed_platforms = data.get("failed_platforms", [])
+    notebook_url = data.get("notebook_url", "")
 
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{html_lib.escape(report_title)} | {today}</title>
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  html {{
-    background: #0f0f0f;
-    color-scheme: dark;
-  }}
-  body {{
-    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
-    background: #0f0f0f;
-    color: #e0e0e0;
-    line-height: 1.65;
-    padding: 40px 20px;
-    margin: 0;
-  }}
-  .mail-bg {{
-    width: 100%;
-    background: #0f0f0f;
-    padding: 32px 0;
-  }}
-  .wrap {{
-    max-width: 620px;
-    margin: 0 auto;
-    background: #0f0f0f;
-  }}
-  .hero {{
-    background: #181818;
-    border: 1px solid #2a2a2a;
-    padding: 22px 20px;
-    margin-bottom: 32px;
-  }}
-  .hero h1 {{ font-size: 24px; font-weight: 400; color: #f0f0f0; margin-bottom: 6px; }}
-  .hero .sub {{ font-size: 14px; color: #555; }}
-  .section-head {{
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: #f0c040;
-    border-bottom: 2px solid #f0c040;
-    padding-bottom: 6px;
-    margin-bottom: 18px;
-  }}
-  .item {{
-    margin-bottom: 20px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid #1a1a1a;
-  }}
-  .item:last-child {{ border-bottom: none; }}
-  .item .platform {{
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: #f0c040;
-    margin-bottom: 3px;
-  }}
-  .item .title {{
-    font-size: 18px;
-    font-weight: 600;
-    color: #e8e8e8;
-    margin-bottom: 5px;
-  }}
-  .item .summary {{
-    font-size: 15px;
-    color: #888;
-    line-height: 1.6;
-  }}
-  .hero-media {{
-    margin-top: 18px;
-    border: 1px solid #2d2d2d;
-    background: #121212;
-    padding: 12px;
-  }}
-  .hero-media img {{
-    width: 100%;
-    display: block;
-    border: 1px solid #202020;
-  }}
-  .hero-media .label {{
-    font-size: 12px;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: #f0c040;
-    margin-bottom: 10px;
-  }}
-  .rich-h2, .rich-h3 {{
-    color: #f3f3f3;
-    margin: 18px 0 8px;
-    line-height: 1.35;
-  }}
-  .rich-h2 {{ font-size: 20px; font-weight: 700; }}
-  .rich-h3 {{ font-size: 17px; font-weight: 700; }}
-  .rich-p {{
-    font-size: 15px;
-    color: #b6b6b6;
-    line-height: 1.72;
-    margin: 0 0 10px;
-  }}
-  .rich-bullet {{
-    font-size: 15px;
-    color: #d2d2d2;
-    line-height: 1.68;
-    margin: 10px 0;
-    padding: 10px 12px;
-    border-left: 3px solid #f0c040;
-    background: rgba(240,192,64,0.08);
-  }}
-  .rich-divider {{
-    height: 1px;
-    background: linear-gradient(90deg, transparent, #3a3a3a, transparent);
-    margin: 20px 0;
-  }}
-  strong {{ color: #f6e3a1; font-weight: 700; }}
-  .footer {{
-    margin-top: 40px;
-    padding-top: 20px;
-    border-top: 1px solid #2a2a2a;
-    font-size: 13px;
-    color: #444;
-  }}
-  .refs-grid {{
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 14px;
-  }}
-  .refs-head {{
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: #f0c040;
-    margin-bottom: 12px;
-  }}
-  .ref-item {{
-    font-size: 14px;
-    color: #9c9c9c;
-    line-height: 1.6;
-    margin-bottom: 0;
-    white-space: nowrap;
-  }}
-  .failed-platforms {{
-    margin-bottom: 24px;
-  }}
-  .failed-item {{
-    background: rgba(239,68,68,0.12);
-    border: 1px solid rgba(239,68,68,0.3);
-    color: #f87171;
-    font-size: 14px;
-    padding: 8px 12px;
-    border-radius: 6px;
-    margin-bottom: 6px;
-  }}
-</style>
-</head>
-<body>
-<div class="mail-bg">
-<div class="wrap">
-  <div class="failed-platforms">
+    # 不把信息图/音频 base64 内嵌到邮件 HTML：
+    # gog 只支持 --body-html 字符串，内嵌大文件会触发 Argument list too long。
+    has_infographic = bool(infographic_path and os.path.isfile(infographic_path))
+
+    failed_section = ""
+    if failed_platforms:
+        failed_items = "".join(f"<li>{html_lib.escape(fp)} 数据异常</li>" for fp in failed_platforms)
+        failed_section = f"""
+    <section class="section alert">
+      <h2>数据异常平台</h2>
+      <ul>{failed_items}</ul>
+    </section>
 """
 
-    for fp in failed_platforms:
-        html += f'    <div class="failed-item" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);color:#f87171;font-size:14px;padding:8px 12px;border-radius:6px;margin-bottom:6px;">⚠️ {html_lib.escape(fp)} 数据异常</div>\n'
-
-    html += "  </div>\n"
-    html += f"""  <div class="hero">
-    <h1 style="font-size:24px;font-weight:400;color:#f0f0f0;margin-bottom:6px;">{html_lib.escape(report_title)}</h1>
-    <div class="sub" style="font-size:14px;color:#555;">全球热点简报 · 由 AI 自动生成</div>
-"""
-    if infographic_path:
-        safe_path = html_lib.escape(infographic_path)
-        html += f"""
-    <div class="hero-media">
-      <div class="label" style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#f0c040;margin-bottom:10px;">Infographic</div>
-      <img src="{safe_path}" alt="infographic" />
-    </div>
-"""
-    html += f"""
-  </div>
-
+    infographic_section = ""
+    if has_infographic:
+        infographic_section = """
+    <section class="section">
+      <h2>信息图</h2>
+      <p>信息图已随邮件附件发送，也已同步到飞书和 Discord。</p>
+    </section>
 """
 
+    audio_section = ""
+    if audio_path:
+        audio_section = f"""
+    <section class="section">
+      <h2>播客</h2>
+      <p>根据社会、游戏、经济、科技四个方面探讨今天的全球热门。</p>
+      <p>播客音频已发送到飞书和 Discord；邮件不附带音频，避免附件过大。</p>
+    </section>
+"""
+
+    topic_sections = []
     for category, category_topics in _group_topics_by_category(topics):
-        html += f"""  <div class="section-head" style="font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#f0c040;border-bottom:2px solid #f0c040;padding-bottom:6px;margin-bottom:18px;">{html_lib.escape(category)}热点</div>
-"""
-        for i, topic in enumerate(category_topics, 1):
-            summary_html = _summary_to_html(topic.get("summary", ""))
-            citations = " ".join(f'[{num}]' for num in topic.get("citations", [])[:6])
-            citations_html = f'<div class="platform" style="font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#f0c040;margin-bottom:3px;">{html_lib.escape(citations)}</div>' if citations else ""
-            html += f"""  <div class="item">
-    <div class="title" style="font-size:18px;font-weight:600;color:#e8e8e8;margin-bottom:5px;">{i}. {topic.get('title', '')}</div>
-    <div class="summary" style="font-size:15px;color:#888;line-height:1.6;">{summary_html}</div>
-    {citations_html}
-  </div>
-"""
+        cards = "".join(_topic_card_html(topic, i) for i, topic in enumerate(category_topics, 1))
+        topic_sections.append(f"""
+    <section class="section">
+      <h2>{html_lib.escape(category)}热点</h2>
+      {cards}
+    </section>
+""")
 
+    refs_section = ""
     if references:
-        html += """  <div class="footer">
-    <div class="refs-head" style="font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#f0c040;margin-bottom:12px;">引用说明</div>
-    <div class="refs-grid">
-"""
+        refs = []
         for ref in references:
             label = html_lib.escape(ref.get("label", ""))
             excerpt = html_lib.escape((ref.get("excerpt", "") or "").strip())
-            suffix = f" | {excerpt}" if excerpt else ""
-            html += f'    <div class="ref-item" style="font-size:14px;color:#9c9c9c;line-height:1.6;margin-bottom:0;white-space:nowrap;">{ref.get("number")}、{label}{suffix}</div>\n'
-        html += "    </div>\n  </div>\n"
+            suffix = f" — {excerpt}" if excerpt else ""
+            refs.append(f'<li><strong>{ref.get("number")}</strong>、{label}{suffix}</li>')
+        refs_section = f"""
+    <section class="section">
+      <h2>引用说明</h2>
+      <ul>{''.join(refs)}</ul>
+    </section>
+"""
 
-    html += """
-</div>
-</div>
+    notebook_link = ""
+    if notebook_url:
+        safe_url = html_lib.escape(notebook_url, quote=True)
+        notebook_link = f'<p>NotebookLM: <a href="{safe_url}">{html_lib.escape(notebook_url)}</a></p>'
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{html_lib.escape(report_title)} {today}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --card: #fffdf9;
+      --ink: #1f2328;
+      --muted: #5f6b76;
+      --accent: #0f5c4d;
+      --border: #d7d1c7;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      padding: 32px 18px;
+      background:
+        radial-gradient(circle at top left, rgba(15, 92, 77, 0.08), transparent 34%),
+        linear-gradient(180deg, #f8f4ed 0%, var(--bg) 100%);
+      color: var(--ink);
+      font: 16px/1.7 Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", serif;
+    }}
+    .wrap {{ max-width: 960px; margin: 0 auto; }}
+    .hero {{
+      padding: 28px 32px;
+      border: 1px solid var(--border);
+      background: linear-gradient(135deg, #fffdf8 0%, #f5efe5 100%);
+      border-radius: 18px;
+      box-shadow: 0 10px 30px rgba(31, 35, 40, 0.06);
+    }}
+    .eyebrow {{ margin: 0 0 10px; color: var(--accent); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }}
+    h1 {{ margin: 0; font-size: 34px; line-height: 1.2; }}
+    .meta {{ margin-top: 12px; color: var(--muted); font-size: 15px; }}
+    .section {{
+      margin-top: 22px;
+      padding: 24px 28px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: 0 8px 24px rgba(31, 35, 40, 0.04);
+    }}
+    .alert {{ border-color: rgba(185, 28, 28, 0.35); background: #fff8f4; }}
+    h2 {{ margin: 0 0 16px; font-size: 24px; line-height: 1.3; }}
+    h3 {{ margin: 0 0 8px; font-size: 19px; line-height: 1.35; }}
+    p, ul {{ margin: 0 0 14px; }}
+    ul {{ padding-left: 20px; }}
+    li {{ margin-bottom: 8px; }}
+    .entry {{ margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #ebe3d7; }}
+    .entry:last-child {{ margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }}
+    .topic-index {{ margin:0 0 4px; color:var(--accent); font-size:13px; letter-spacing:0.08em; font-weight:bold; }}
+    .topic-summary p {{ margin-bottom: 10px; }}
+    .topic-meta {{ color: var(--muted); font-size: 13px; margin-top: 8px; }}
+    .chips {{ margin-top: 10px; }}
+    .chip {{ display:inline-block; margin:0 6px 6px 0; padding:2px 8px; border:1px solid var(--border); border-radius:999px; color:var(--muted); font-size:12px; background:#f7f1e7; }}
+    code {{ padding: 0.1em 0.35em; background: #f1ece2; border-radius: 4px; font-size: 0.92em; }}
+    a {{ color: var(--accent); }}
+    strong {{ color: var(--ink); }}
+    .footer {{ margin-top: 20px; color: var(--muted); font-size: 14px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <p class="eyebrow">Global Hot Trends Brief</p>
+      <h1>{html_lib.escape(report_title)}</h1>
+      <div class="meta">{today} · 社会 / 游戏 / 经济 / 科技 · NotebookLM 聚合生成</div>
+    </section>
+{failed_section}{infographic_section}{audio_section}{''.join(topic_sections)}{refs_section}
+    <section class="section">
+      <h2>链接与说明</h2>
+      {notebook_link}
+      <p class="footer">本简报由 AI 自动生成，用于趋势观察和信息参考。</p>
+    </section>
+  </div>
 </body>
 </html>"""
-
-    return html
 
 
 def render_briefing_email_html(data: Dict) -> str:

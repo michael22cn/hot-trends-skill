@@ -11,8 +11,8 @@ YOUTUBE_SOURCE_SPECS = [
     },
     {
         "channel": "technology_news_us",
-        "source": "youtube.com/feed/news_destination/technology",
-        "url": "https://www.youtube.com/feed/news_destination/technology?gl=US&hl=en",
+        "source": "youtube.com/feed/news_destination/science_and_technology",
+        "url": "https://www.youtube.com/feed/news_destination/science_and_technology?gl=US&hl=en",
     },
     {
         "channel": "focus_news_us",
@@ -34,13 +34,28 @@ def _extract_youtube_items(page, source_channel: str, source_name: str, source_u
     for selector in selectors:
         for item in page.query_selector_all(selector):
             title_elem = item.query_selector("#video-title")
-            channel_elem = item.query_selector("#channel-name a, ytd-channel-name a")
+            channel_elem = item.query_selector("#channel-name a, ytd-channel-name a, ytd-channel-name yt-formatted-string")
             meta_elem = item.query_selector("#metadata-line")
 
             title = " ".join((title_elem.inner_text() if title_elem else "").split()).strip()
             channel_name = " ".join((channel_elem.inner_text() if channel_elem else "").split()).strip() or "Unknown"
             meta = " ".join((meta_elem.inner_text() if meta_elem else "").split()).strip()
-            href = (title_elem.get_attribute("href") if title_elem else "") or ""
+
+            # Try href from title_elem first, then fall back to parent <a>
+            href = ""
+            if title_elem:
+                href = title_elem.get_attribute("href") or ""
+                if not href:
+                    # #video-title may be a <yt-formatted-string> inside <a> — get href via page.evaluate
+                    item_handle = item
+                    href = page.evaluate("""
+                        (item) => {
+                            const el = item.querySelector('#video-title');
+                            if (!el) return '';
+                            const anchor = el.closest('a');
+                            return anchor ? anchor.getAttribute('href') || '' : '';
+                        }
+                    """, item_handle)
 
             if not title or not href:
                 continue

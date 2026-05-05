@@ -198,8 +198,8 @@ def send_discord_audio(webhook_url, file_path, caption):
 
 # ── audio processing ────────────────────────────────────────────────────────
 def wait_and_download_audio(notebook_id, artifact_id, output_path):
-    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_WAIT", "1800"))
-    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_POLL", "20"))
+    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_WAIT", "3600"))
+    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_POLL", "60"))
     deadline = time.time() + wait_seconds
 
     while time.time() < deadline:

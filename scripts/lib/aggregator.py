@@ -458,8 +458,8 @@ def _artifact_status(notebook_id: str, artifact_id: str) -> Optional[str]:
 
 
 def _wait_and_download_infographic(notebook_id: str, artifact_id: str, output_dir: str) -> Optional[str]:
-    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_WAIT", "900"))
-    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_POLL", "10"))
+    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_WAIT", "3600"))
+    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_INFOGRAPHIC_POLL", "60"))
     deadline = time.time() + wait_seconds
     output_path = os.path.join(output_dir, f"{notebook_id}_infographic.png")
 
@@ -570,8 +570,8 @@ print(path)
 
 
 def _wait_and_download_audio(notebook_id: str, artifact_id: str, output_dir: str) -> Optional[str]:
-    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_WAIT", "1800"))
-    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_POLL", "20"))
+    wait_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_WAIT", "3600"))
+    poll_seconds = int(os.getenv("HOT_TRENDS_NLM_AUDIO_POLL", "60"))
     deadline = time.time() + wait_seconds
     output_path = os.path.join(output_dir, f"{notebook_id}_podcast.m4a")
 
